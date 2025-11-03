@@ -1,0 +1,239 @@
+1.n BatchApproverAuthController.java (New File)
+This is your new, renamed controller with the updated API path. Path: paymentinitiationbackend/controller/BatchApproverAuthController.java
+
+package paymentinitiationbackend.controller;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import paymentinitiationbackend.dto.ApprovalRequestDto;
+import paymentinitiationbackend.model.Approver;
+import paymentinitiationbackend.repository.ApproverRepository;
+
+import java.util.Optional;
+
+// 1. CLASS RENAMED
+@RestController
+// 2. REQUEST MAPPING UPDATED
+@RequestMapping("/api/approve")
+@Tag(name = "Authentication", description = "APIs for approver registration and login")
+public class BatchApproverAuthController {
+
+    private final ApproverRepository approverRepository;
+
+    @Autowired
+    public BatchApproverAuthController(ApproverRepository approverRepository) {
+        this.approverRepository = approverRepository;
+    }
+
+    /**
+     * API 1: Register a new approver.
+     * Use this from Swagger or Postman to add users to the 'approvers' table.
+     * Path: POST /api/approve/register
+     */
+    @PostMapping("/register")
+    @Operation(summary = "Register a new approver", description = "Creates a new approver user with a user ID and password. (For internal/setup use)")
+    @ApiResponse(responseCode = "201", description = "Approver registered successfully")
+    @ApiResponse(responseCode = "400", description = "User ID already exists")
+    public ResponseEntity<String> registerApprover(@RequestBody ApprovalRequestDto request) {
+        if (approverRepository.findByUserId(request.getApproverName()).isPresent()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("User ID already exists");
+        }
+        
+        Approver newApprover = new Approver();
+        newApprover.setUserId(request.getApproverName());
+        newApprover.setPassword(request.getPassword()); // Remember to HASH passwords in production
+        approverRepository.save(newApprover);
+        
+        return ResponseEntity.status(HttpStatus.CREATED).body("Approver registered successfully");
+    }
+
+    /**
+     * API 2: Authenticate an approver (login).
+     * The frontend will call this API from the modal.
+     * Path: POST /api/approve/login
+     */
+    @PostMapping("/login")
+    @Operation(summary = "Authenticate an approver", description = "Verifies an approver's user ID and password")
+    @ApiResponse(responseCode = "200", description = "Authentication successful")
+    @ApiResponse(responseCode = "401", description = "Invalid credentials")
+    public ResponseEntity<String> loginApprover(@RequestBody ApprovalRequestDto request) {
+        Optional<Approver> approverOpt = approverRepository.findByUserId(request.getApproverName());
+
+        if (approverOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+        }
+
+        Approver approver = approverOpt.get();
+        // Plain text password check as requested
+        if (approver.getPassword().equals(request.getPassword())) {
+            // NOTE: This endpoint just validates.
+            // It assumes another login process sets the token in localStorage.
+            return ResponseEntity.ok("Authentication successful");
+        } else {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+        }
+    }
+}
+
+
+
+2. api.js (New File)
+This is the new API utility file your team is using. Place this in your frontend's services folder. Path: src/services/api.js
+
+export const API_BASE_URL = "http://localhost:8080";
+
+export async function apiFetch(endpoint, options = {}) {
+  const token = localStorage.getItem("token");
+
+  const headers = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...options.headers,
+  };
+
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  if (response.status === 401) {
+    console.warn("Session expired or invalid token");
+    localStorage.removeItem("token");
+    window.location.href = "/"; // Redirect to login
+  }
+
+  return response;
+}
+
+
+3. ApprovalService.js (Updated)
+This is your existing ApprovalService.js file, now updated to use the new apiFetch function. It will automatically send the token in its headers for all calls.
+
+Path: src/services/ApprovalService.js
+
+// Import the new apiFetch function
+import { apiFetch } from './api';
+
+/**
+ * Helper to process the response from apiFetch
+ */
+const processResponse = async (response) => {
+    // apiFetch already handles 401, but we handle other errors
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Request failed with status ${response.status}`);
+    }
+    // Try parsing JSON, but return text if it's not JSON
+    // This is needed for the "Authentication successful" string response
+    const text = await response.text();
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        return text; 
+    }
+};
+
+/**
+ * Authenticates an approver (step-up auth for the modal)
+ * Path: POST /api/approve/login
+ */
+const login = async (userId, password) => {
+    // Uses apiFetch, will send token if it exists
+    const response = await apiFetch(`/api/approve/login`, {
+        method: 'POST',
+        body: JSON.stringify({
+            approverName: userId,
+            password: password
+        }),
+    });
+    return processResponse(response);
+};
+
+/**
+ * Fetches all pending batches
+ * Path: GET /api/approvals/pending
+ */
+const getPendingBatches = async () => {
+    // Uses apiFetch, will send token
+    const response = await apiFetch(`/api/approvals/pending`);
+    return processResponse(response);
+};
+
+/**
+ * Fetches all reviewed batches
+ * Path: GET /api/approvals/reviewed
+ */
+const getReviewedBatches = async () => {
+    // Uses apiFetch, will send token
+    const response = await apiFetch(`/api/approvals/reviewed`);
+    return processResponse(response);
+};
+
+/**
+ * Approves a batch.
+ * Path: PUT /api/approvals/{id}/approve
+ */
+const approveBatch = async (batchId, approvalData) => {
+    // Uses apiFetch, will send token
+    const response = await apiFetch(`/api/approvals/${batchId}/approve`, {
+        method: 'PUT',
+        body: JSON.stringify(approvalData), // DTO without password
+    });
+    return processResponse(response);
+};
+
+/**
+ * Rejects a batch.
+ * Path: PUT /api/approvals/{id}/reject
+ */
+const rejectBatch = async (batchId, approvalData) => {
+    // Uses apiFetch, will send token
+    const response = await apiFetch(`/api/approvals/${batchId}/reject`, {
+        method: 'PUT',
+        body: JSON.stringify(approvalData), // DTO without password
+    });
+    return processResponse(response);
+};
+
+/**
+ * Transforms raw API batch data into the format expected by the frontend.
+ * (This function remains unchanged)
+ */
+const transformBatchData = (batch) => {
+    return {
+        id: batch.id,
+        batchId: batch.id,
+        batchName: batch.batchName,
+        createdBy: batch.createdBy || 'Unknown',
+        createdDate: batch.createdDate || new Date().toISOString(),
+        status: batch.status,
+        totalAmount: batch.totalAmount,
+        currency: batch.currency,
+        employeeCount: batch.employeeCount,
+        approversRequired: batch.approversRequired || 1,
+        approversAssigned: batch.approversAssigned || 0,
+        debitAccount: batch.debitAccount,
+        description: batch.description,
+        approvedBy: batch.approvedBy,
+        approvedDate: batch.approvedDate,
+        approvalComments: batch.approvalComments,
+    };
+};
+
+const ApprovalService = {
+    login,
+    getPendingBatches,
+    getReviewedBatches,
+    approveBatch,
+    rejectBatch,
+    transformBatchData
+};
+
+export default ApprovalService;
+
+
