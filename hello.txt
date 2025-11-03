@@ -1,0 +1,532 @@
+1.  app.js
+  import React, { useState, useEffect, useMemo } from "react";
+import LandingPage from "./aaaaa/LandingPage";
+import AccountHeader from "./aaaaa/AccountHeader";
+import TransactionHistory from "./aaaaa/TransactionHistory";
+
+// Import your API functions
+import { getBankAccounts, getBatches, getEmployees } from "./api";
+
+export default function App() {
+  const [selectedAccount, setSelectedAccount] = useState(null);
+  const [currency, setCurrency] = useState("INR");
+
+  // --- Backend Data State ---
+  const [profiles, setProfiles] = useState([]); // From /api/bank-accounts
+  const [batches, setBatches] = useState([]); // From /api/batches
+  const [employees, setEmployees] = useState([]); // From /api/employees
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // --- Data Fetching ---
+  useEffect(() => {
+    const fetchAllData = async () => {
+      try {
+        setLoading(true);
+
+        // Use specific API functions from your api.js
+        const [accountsData, batchesData, employeesData] = await Promise.all([
+          getBankAccounts(),
+          getBatches(),
+          getEmployees(),
+        ]);
+
+        // 1. Set profiles from bank accounts.
+        const profileData = accountsData.map((acc) => ({
+          id: acc.id,
+          name: acc.accountName,
+          accountNumber: acc.accountNumber,
+          balance: acc.balance,
+          initialBalance: acc.balance, // Using balance as initialBalance
+          currency: "USD", // Assuming default currency, you can change this
+          transactions: [], // This will be calculated dynamically
+        }));
+        
+        setProfiles(profileData);
+        setBatches(batchesData);
+        setEmployees(employeesData);
+        setError(null);
+      } catch (err) {
+        console.error("Error fetching data:", err);
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAllData();
+  }, []); // Empty array means this runs once on component mount
+
+  // --- Transaction Calculation ---
+  const transactionsForSelectedAccount = useMemo(() => {
+    if (!selectedAccount) {
+      return [];
+    }
+
+    // 1. Calculate the total salary for each batch
+    const salaryTotalsByBatchId = employees.reduce((acc, employee) => {
+      if (employee.batchId) {
+        if (!acc[employee.batchId]) {
+          acc[employee.batchId] = 0;
+        }
+        acc[employee.batchId] += employee.salaryAmount;
+      }
+      return acc;
+    }, {});
+
+    // 2. Filter batches that belong to the selected account
+    const relevantBatches = batches.filter(
+      (batch) => batch.debitAccount === selectedAccount.accountNumber
+    );
+
+    // 3. Map batches to the format TransactionHistory expects
+    const formattedTransactions = relevantBatches
+      .filter(batch => batch.lastPaymentDate) // Only show batches that have been paid
+      .map((batch) => ({
+        date: batch.lastPaymentDate.split("T")[0], // Format date as YYYY-MM-DD
+        id: `BAT-${batch.id}`, // Use batch ID as the Transaction ID
+        description: batch.name, // Use batch name for description
+        amount: salaryTotalsByBatchId[batch.id] || 0, // Get the calculated sum
+        approver: batch.userId || "N/A", // Use userId as the approver
+      }));
+
+    return formattedTransactions;
+  }, [selectedAccount, batches, employees]);
+
+  // --- Render Logic ---
+
+  if (loading) {
+    return <div>Loading Account Data...</div>;
+  }
+
+  if (error) {
+    return <div>Error: {error}</div>;
+  }
+
+  if (!selectedAccount) {
+    return (
+      <LandingPage
+        profiles={profiles}
+        onSelectProfile={(acc) => {
+          setSelectedAccount(acc);
+          setCurrency(acc.currency);
+        }}
+      />
+    );
+  }
+
+  // Once an account is selected, render the account details
+  return (
+    <div>
+      <AccountHeader
+        name={selectedAccount.name}
+        accountNumber={selectedAccount.accountNumber}
+        balance={selectedAccount.balance}
+        currency={currency}
+        onCurrencyChange={setCurrency}
+      />
+      <TransactionHistory
+        transactions={transactionsForSelectedAccount}
+        accountBalance={selectedAccount.balance}
+        initialBalance={selectedAccount.initialBalance}
+        currency={currency}
+        // 👇 Pass the function to go back
+        onBack={() => setSelectedAccount(null)}
+      />
+    </div>
+  );
+}
+
+
+
+2. TransactionHistory.js
+
+import React, { useState } from "react";
+import "./TransactionHistory.css";
+import html2pdf from "html2pdf.js";
+
+const currencies = [
+  { code: "INR", symbol: "₹" },
+  { code: "USD", symbol: "$" },
+];
+
+const exchangeRates = {
+  INR: 88, // 1 USD = 88 INR (example)
+  USD: 1,
+};
+
+function convertBalance(balance, target) {
+  return (balance * (exchangeRates[target] || 1)).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+  });
+}
+
+function TransactionHistory({
+  transactions = [],
+  currency = "USD",
+  accountBalance = 0,
+  accountName = "",
+  accountNumber = "",
+  bankName = "Standard Chartered",
+  initialBalance = 0, // ✅ use initialBalance from props
+  onBack, // 👈 Accept the onBack prop
+}) {
+  const [filter, setFilter] = useState({ start: "", end: "" });
+
+  // Default date range - one month ago to today
+  const getDefaultDateRange = () => {
+    const today = new Date();
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(today.getMonth() - 1);
+    return { start: oneMonthAgo, end: today };
+  };
+
+  // Filter out transactions outside date range
+  const filtered = transactions.filter((txn) => {
+    if (txn.initialBalance !== undefined) return false; // ignore placeholder
+    const txnDate = new Date(txn.date);
+    const defaultRange = getDefaultDateRange();
+    const startDate = filter.start ? new Date(filter.start) : defaultRange.start;
+    const endDate = filter.end ? new Date(filter.end) : defaultRange.end;
+    return txnDate >= startDate && txnDate <= endDate;
+  });
+
+  // Sort transactions (newest first)
+  const sortedTransactions = [...filtered].sort(
+    (a, b) => new Date(b.date) - new Date(a.date)
+  );
+
+  // Calculate opening balance
+  const openingBalance = (() => {
+    const defaultRange = getDefaultDateRange();
+    const startDate = filter.start ? new Date(filter.start) : defaultRange.start;
+
+    const totalBeforeStart = transactions
+      .filter((txn) => {
+        if (txn.initialBalance !== undefined) return false;
+        return new Date(txn.date) < startDate;
+      })
+      .reduce((sum, txn) => sum + txn.amount, 0);
+
+    return initialBalance + totalBeforeStart;
+  })();
+
+  // Calculate total of transactions in range
+  const transactionTotal = sortedTransactions.reduce(
+    (sum, txn) => sum + txn.amount,
+    0
+  );
+
+  // Closing balance
+  const closingBalance = openingBalance - transactionTotal;
+
+  // Helper: Get currency symbol
+  const getCurrencySymbol = (code) =>
+    currencies.find((c) => c.code === code)?.symbol || "$";
+
+  // Download PDF handler
+  function handleDownload() {
+    const symbol = getCurrencySymbol(currency);
+    const today = new Date().toISOString().split("T")[0];
+
+    const content = document.createElement("div");
+    content.style.padding = "20px";
+    content.style.fontFamily = "Arial, sans-serif";
+
+    content.innerHTML = `
+      <h1 style="font-size: 20px; margin-bottom: 12px;">Transaction Report</h1>
+      <div style="margin: 16px 0 20px 0; font-size: 11px; border-bottom: 2px solid #333; padding-bottom: 12px;">
+        <div style="margin-bottom: 6px;"><strong>Account Name:</strong> ${accountName}</div>
+        <div style="margin-bottom: 6px;"><strong>Account Number:</strong> ${accountNumber}</div>
+        <div style="margin-bottom: 6px;"><strong>Bank:</strong> ${bankName}</div>
+        <div style="margin-bottom: 6px;"><strong>Current Balance:</strong> ${symbol} ${Number(
+      accountBalance
+    ).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+      </div>
+      <div style="margin: 16px 0; font-size: 12px;">
+        <div style="margin-bottom: 8px;"><strong>Opening Balance:</strong> ${symbol} ${Number(
+      openingBalance
+    ).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+        <div style="margin-bottom: 16px;"><strong>Closing Balance:</strong> ${symbol} ${Number(
+      closingBalance
+    ).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+      </div>
+      <table style="width: 100%; border-collapse: collapse; font-size: 10px;">
+        <thead>
+          <tr style="background-color: #f5f5f5;">
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Date</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Transaction ID</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Description</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: right;">Amount</th>
+            <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Approved By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sortedTransactions
+            .map(
+              (txn) => `
+            <tr>
+              <td style="border: 1px solid #ddd; padding: 8px;">${txn.date}</td>
+              <td style="border: 1px solid #ddd; padding: 8px;">${txn.id || ""}</td>
+              <td style="border: 1px solid #ddd; padding: 8px;">${txn.description || ""}</td>
+              <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${symbol} ${Number(
+                txn.amount
+              ).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+              <td style="border: 1px solid #ddd; padding: 8px;">${txn.approver || ""}</td>
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `;
+
+    const options = {
+      margin: 10,
+      filename: `transaction-report-${today}.pdf`,
+      image: { type: "jpeg", quality: 0.98 },
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+    };
+
+    html2pdf().set(options).from(content).save();
+  }
+
+  return (
+    <div className="txn-root">
+      {/* Filter Section */}
+      <div className="txn-filter-row">
+        {/* 👇 Add the Back Button here */}
+        <button className="back-btn" onClick={onBack}>
+          &larr; Back to Accounts
+        </button>
+
+        <div className="txn-date-filters">
+          <label>
+            Start Date:
+            <input
+              type="date"
+              value={filter.start}
+              onChange={(e) => setFilter({ ...filter, start: e.target.value })}
+            />
+          </label>
+          <label>
+            End Date:
+            <input
+              type="date"
+              value={filter.end}
+              onChange={(e) => setFilter({ ...filter, end: e.target.value })}
+            />
+          </label>
+        </div>
+        <div className="txn-actions">
+          <button
+            className="clear-btn"
+            onClick={() => setFilter({ start: "", end: "" })}
+          >
+            Clear
+          </button>
+          <button className="download-btn" onClick={handleDownload}>
+            Download
+          </button>
+        </div>
+      </div>
+
+      {/* Balances */}
+      <div className="txn-balances-row">
+        <span className="openingBalance">
+          Opening Balance:{" "}
+          <strong>
+            {getCurrencySymbol(currency)}
+            {convertBalance(openingBalance, currency)}
+          </strong>
+        </span>
+        <span className="closingBalance">
+          Closing Balance:{" "}
+          <strong>
+            {getCurrencySymbol(currency)}
+            {convertBalance(closingBalance, currency)}
+          </strong>
+        </span>
+      </div>
+
+      {/* Table */}
+      <table className="txn-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Transaction ID</th>
+            <th>Description</th>
+            <th>Amount</th>
+            <th>Approved By</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sortedTransactions.map((txn, i) => (
+            <tr key={txn.id || i}>
+              <td>{txn.date}</td>
+              <td>{txn.id}</td>
+              <td>{txn.description}</td>
+              <td style={{ textAlign: "right" }}>
+                {getCurrencySymbol(currency)}{" "}
+                {txn.amount.toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                })}
+              </td>
+              <td>{txn.approver}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default TransactionHistory;
+
+
+3. TransactionHistory.css
+
+/* Add this new style for the back button */
+.back-btn {
+  background-color: #f0f0f0;
+  color: #333;
+  border: 1px solid #ccc;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 14px;
+  transition: background-color 0.2s, box-shadow 0.2s;
+}
+
+.back-btn:hover {
+  background-color: #e6e6e6;
+  border-color: #bbb;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* This is a basic layout for the filter row based on your JS */
+.txn-filter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  background-color: #fafafa;
+  border-bottom: 1px solid #eee;
+  flex-wrap: wrap; /* Allows items to wrap on smaller screens */
+  gap: 16px; /* Adds spacing between items when they wrap */
+}
+
+.txn-date-filters {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.txn-date-filters label {
+  font-size: 14px;
+  color: #555;
+}
+
+.txn-date-filters input {
+  margin-left: 8px;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.txn-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto; /* Pushes buttons to the right */
+}
+
+/* Styles for other buttons, inferred from your JS */
+.clear-btn, .download-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 14px;
+  transition: background-color 0.2s, opacity 0.2s;
+}
+
+.clear-btn {
+  background-color: #fff;
+  border: 1px solid #d1d5db;
+  color: #374151;
+}
+
+.clear-btn:hover {
+  background-color: #f9fafb;
+}
+
+.download-btn {
+  background-color: #007bff;
+  color: white;
+}
+
+.download-btn:hover {
+  opacity: 0.9;
+}
+
+/* Other styles from your original file would go here... */
+
+.txn-root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0 auto;
+  max-width: 1200px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+
+.txn-balances-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 16px;
+  font-size: 16px;
+  background-color: #fdfdfd;
+  border-bottom: 1px solid #eee;
+}
+
+.openingBalance {
+  color: #666;
+}
+
+.closingBalance {
+  color: #333;
+}
+
+.txn-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.txn-table th, .txn-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.txn-table th {
+  background-color: #f9f9f9;
+  font-size: 12px;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.txn-table td {
+  font-size: 14px;
+  color: #333;
+}
+
+.txn-table tbody tr:hover {
+  background-color: #fcfcfc;
+}
