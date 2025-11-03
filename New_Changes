@@ -1,0 +1,1258 @@
+1. Approver.java (New Entity)
+Create this file in paymentinitiationbackend.model
+
+
+package paymentinitiationbackend.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "approvers")
+public class Approver {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "user_id", unique = true, nullable = false, length = 100)
+    private String userId;
+
+    @Column(name = "password", nullable = false, length = 100)
+    private String password;
+
+    // Constructors
+    public Approver() {
+    }
+
+    // Getters and Setters
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public void setUserId(String userId) {
+        this.userId = userId;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+}
+
+
+2. ApproverRepository.java (New Repository)
+Create this file in paymentinitiationbackend.repository
+
+
+package paymentinitiationbackend.repository;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+import paymentinitiationbackend.model.Approver;
+
+import java.util.Optional;
+
+@Repository
+public interface ApproverRepository extends JpaRepository<Approver, Long> {
+
+    /**
+     * Find an approver by their user ID.
+     */
+    Optional<Approver> findByUserId(String userId);
+}
+
+
+3. AuthController.java (New Controller)
+Create this file in paymentinitiationbackend.controller
+
+package paymentinitiationbackend.controller;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import paymentinitiationbackend.dto.ApprovalRequestDto; // Reusing this DTO
+import paymentinitiationbackend.model.Approver;
+import paymentinitiationbackend.repository.ApproverRepository;
+
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/auth")
+@Tag(name = "Authentication", description = "APIs for approver registration and login")
+public class AuthController {
+
+    private final ApproverRepository approverRepository;
+
+    @Autowired
+    public AuthController(ApproverRepository approverRepository) {
+        this.approverRepository = approverRepository;
+    }
+
+    /**
+     * API 1: Register a new approver (for setup).
+     */
+    @PostMapping("/register")
+    @Operation(summary = "Register a new approver", description = "Creates a new approver user. Use this from Swagger/Postman to add users.")
+    @ApiResponse(responseCode = "201", description = "Approver registered successfully")
+    @ApiResponse(responseCode = "400", description = "User ID already exists")
+    public ResponseEntity<String> registerApprover(@RequestBody ApprovalRequestDto request) {
+        if (approverRepository.findByUserId(request.getApproverName()).isPresent()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("User ID already exists");
+        }
+        
+        // We reuse ApprovalRequestDto: approverName -> userId, password -> password
+        Approver newApprover = new Approver();
+        newApprover.setUserId(request.getApproverName());
+        newApprover.setPassword(request.getPassword()); // In a real app, HASH this password
+        approverRepository.save(newApprover);
+        
+        return ResponseEntity.status(HttpStatus.CREATED).body("Approver registered successfully");
+    }
+
+    /**
+     * API 2: Authenticate (login) an approver.
+     */
+    @PostMapping("/login")
+    @Operation(summary = "Authenticate an approver", description = "Verifies an approver's user ID and password")
+    @ApiResponse(responseCode = "200", description = "Authentication successful")
+    @ApiResponse(responseCode = "401", description = "Invalid credentials")
+    public ResponseEntity<String> loginApprover(@RequestBody ApprovalRequestDto request) {
+        Optional<Approver> approverOpt = approverRepository.findByUserId(request.getApproverName());
+
+        if (approverOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+        }
+
+        Approver approver = approverOpt.get();
+        // Plain text check as requested.
+        if (approver.getPassword().equals(request.getPassword())) {
+            return ResponseEntity.ok("Authentication successful");
+        } else {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
+        }
+    }
+}
+
+
+4. ApprovalController.java (Heavily Modified)
+This is the fully updated ApprovalController.java
+
+package paymentinitiationbackend.controller;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+import paymentinitiationbackend.dto.ApprovalBatchDto;
+import paymentinitiationbackend.dto.ApprovalRequestDto;
+import paymentinitiationbackend.dto.ApprovalStatisticsDto;
+import paymentinitiationbackend.model.Batch;
+import paymentinitiationbackend.model.Employee;
+import paymentinitiationbackend.repository.BatchRepository;
+import paymentinitiationbackend.repository.EmployeeRepository;
+import paymentinitiationbackend.service.ApprovalService;
+import paymentinitiationbackend.repository.BankAccountRepository;
+import paymentinitiationbackend.model.BankAccount;
+
+import java.math.BigDecimal;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/approvals")
+@Tag(name = "Approval Management", description = "APIs for managing payroll batch approvals")
+public class ApprovalController {
+
+    private final ApprovalService approvalService;
+    private final BatchRepository batchRepository;
+    private final EmployeeRepository employeeRepository;
+    private final BankAccountRepository bankAccountRepository;
+
+    // Define the threshold for dual approval
+    private static final BigDecimal DUAL_APPROVAL_THRESHOLD = new BigDecimal("500000");
+
+    @Autowired
+    public ApprovalController(ApprovalService approvalService,
+                              BatchRepository batchRepository,
+                              EmployeeRepository employeeRepository,
+                              BankAccountRepository bankAccountRepository) {
+        this.approvalService = approvalService;
+        this.batchRepository = batchRepository;
+        this.employeeRepository = employeeRepository;
+        this.bankAccountRepository = bankAccountRepository;
+    }
+
+    @GetMapping("/pending")
+    @Operation(summary = "Get pending batches", description = "Retrieve all batches that are pending L1 or L2 approval")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Successfully retrieved pending batches",
+                    content = @Content(schema = @Schema(implementation = ApprovalBatchDto.class))),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+    })
+    public ResponseEntity<List<ApprovalBatchDto>> getPendingBatches() {
+        try {
+            List<Batch> batches = batchRepository.findAll();
+            List<ApprovalBatchDto> pending = batches.stream()
+                    // UPDATED: A batch is pending if its status is "Pending" OR "Pending_L2"
+                    .filter(b -> b.getPaymentStatus() != null &&
+                            (b.getPaymentStatus().equalsIgnoreCase("Pending") || b.getPaymentStatus().equalsIgnoreCase("Pending_L2")))
+                    .filter(b -> b.getDebitAccount() != null && !b.getDebitAccount().trim().isEmpty())
+                    .filter(b -> b.getCurrency() != null && !b.getCurrency().trim().isEmpty())
+                    .map(this::mapBatchToApprovalDto)
+                    .toList();
+            return ResponseEntity.ok(pending);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping("/reviewed")
+    @Operation(summary = "Get reviewed batches", description = "Retrieve all batches that have been approved or rejected")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Successfully retrieved reviewed batches",
+                    content = @Content(schema = @Schema(implementation = ApprovalBatchDto.class))),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+    })
+    public ResponseEntity<List<ApprovalBatchDto>> getReviewedBatches() {
+        try {
+            List<Batch> batches = batchRepository.findAll();
+            List<ApprovalBatchDto> reviewed = batches.stream()
+                    .filter(b -> b.getPaymentStatus() != null && (b.getPaymentStatus().equalsIgnoreCase("approved") || b.getPaymentStatus().equalsIgnoreCase("rejected")))
+                    .map(this::mapBatchToApprovalDto)
+                    .toList();
+            return ResponseEntity.ok(reviewed);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping("/pending/{id}")
+    @Operation(summary = "Get pending batch by ID", description = "Retrieve a specific pending (L1 or L2) batch by its ID")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Successfully retrieved the batch",
+                    content = @Content(schema = @Schema(implementation = ApprovalBatchDto.class))),
+            @ApiResponse(responseCode = "404", description = "Batch not found"),
+            @ApiResponse(responseCode = "400", description = "Batch is not pending approval")
+    })
+    public ResponseEntity<ApprovalBatchDto> getPendingBatchById(
+            @Parameter(description = "Batch ID", required = true) @PathVariable Long id) {
+        try {
+            return batchRepository.findById(id)
+                    // UPDATED: Check for both pending states
+                    .filter(b -> b.getPaymentStatus() != null &&
+                            (b.getPaymentStatus().equalsIgnoreCase("Pending") || b.getPaymentStatus().equalsIgnoreCase("Pending_L2")))
+                    .map(this::mapBatchToApprovalDto)
+                    .map(ResponseEntity::ok)
+                    .orElse(ResponseEntity.notFound().build());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @PutMapping("/{id}/approve")
+    @Transactional
+    @Operation(summary = "Approve a batch", description = "Approve a pending batch. Handles L1 and L2 logic.")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Batch approved successfully (L1 or L2)"),
+            @ApiResponse(responseCode = "400", description = "Invalid request or batch not pending"),
+            @ApiResponse(responseCode = "403", description = "Forbidden. Same user cannot approve twice."),
+            @ApiResponse(responseCode = "404", description = "Batch or Account not found"),
+            @ApiResponse(responseCode = "409", description = "Insufficient funds"),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+    })
+    public ResponseEntity<ApprovalBatchDto> approveBatch(
+            @Parameter(description = "Batch ID", required = true) @PathVariable Long id,
+            @RequestBody ApprovalRequestDto approvalRequest) {
+        
+        // Authentication is now handled by /api/auth/login
+        // The password in approvalRequest is no longer used here.
+        
+        try {
+            Batch batch = batchRepository.findById(id).orElse(null);
+            if (batch == null) return ResponseEntity.notFound().build();
+
+            String currentStatus = batch.getPaymentStatus();
+            String approverName = approvalRequest.getApproverName();
+
+            // Check if batch is in a valid state to be approved
+            if (currentStatus == null ||
+                    (!currentStatus.equalsIgnoreCase("Pending") && !currentStatus.equalsIgnoreCase("Pending_L2"))) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build(); // Already approved/rejected
+            }
+
+            // Calculate total amount
+            List<Employee> emps = employeeRepository.findByBatchId(id);
+            BigDecimal total = emps.stream()
+                    .map(Employee::getSalaryAmount)
+                    .filter(Objects::nonNull)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            boolean requiresDualApproval = total.compareTo(DUAL_APPROVAL_THRESHOLD) > 0;
+            boolean isL1Approval = currentStatus.equalsIgnoreCase("Pending");
+            boolean isL2Approval = currentStatus.equalsIgnoreCase("Pending_L2");
+
+            // --- DUAL-APPROVAL LOGIC ---
+            if (requiresDualApproval) {
+                if (isL1Approval) {
+                    // This is the first approval for a high-value batch
+                    batch.setPaymentStatus("Pending_L2"); // Move to L2 pending state
+                    batch.setApprover1Name(approverName);
+                    // Do NOT debit account yet
+                    batchRepository.save(batch);
+                } else if (isL2Approval) {
+                    // This is the second approval
+                    // Check if approver is different
+                    if (approverName.equalsIgnoreCase(batch.getApprover1Name())) {
+                        return ResponseEntity.status(HttpStatus.FORBIDDEN).build(); // Same user
+                    }
+                    // All checks passed, proceed to debit and approve
+                    debitAccountAndSetRefs(batch, emps, total); // <-- Helper function
+                    batch.setPaymentStatus("approved");
+                    batch.setApprover2Name(approverName);
+                    batch.setLastPaymentDate(java.time.LocalDateTime.now());
+                    batchRepository.save(batch);
+                }
+            } else {
+                // --- SINGLE-APPROVAL LOGIC ---
+                if (isL1Approval) {
+                    // Standard approval, debit and approve
+                    debitAccountAndSetRefs(batch, emps, total); // <-- Helper function
+                    batch.setPaymentStatus("approved");
+                    batch.setApprover1Name(approverName); // Store the single approver
+                    batch.setLastPaymentDate(java.time.LocalDateTime.now());
+                    batchRepository.save(batch);
+                } else {
+                    // Should not happen (e.g., L2 status for low-value batch)
+                    return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+                }
+            }
+
+            // Map and return the updated DTO
+            ApprovalBatchDto dto = mapBatchToApprovalDto(batch);
+            dto.setApprovedBy(approverName); // Set 'approvedBy' to the *current* approver
+            dto.setApprovedDate(java.time.LocalDateTime.now());
+            dto.setApprovalComments(approvalRequest.getComments());
+            
+            return ResponseEntity.ok(dto);
+
+        } catch (InsufficientFundsException e) {
+             return ResponseEntity.status(HttpStatus.CONFLICT).build(); // 409 Conflict
+        } catch (BankAccountNotFoundException e) {
+             return ResponseEntity.status(HttpStatus.NOT_FOUND).build(); // 404 Not Found
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Helper method to debit account and assign transaction references.
+     * Throws custom exceptions to be caught by the controller.
+     */
+    private void debitAccountAndSetRefs(Batch batch, List<Employee> emps, BigDecimal total) 
+            throws BankAccountNotFoundException, InsufficientFundsException {
+        
+        String accNum = batch.getDebitAccount();
+        if (accNum == null || accNum.isBlank()) {
+            throw new BankAccountNotFoundException(); // Or use 400 Bad Request in controller
+        }
+        
+        BankAccount acct = bankAccountRepository.findByAccountNumber(accNum)
+                .orElseThrow(BankAccountNotFoundException::new);
+
+        if (acct.getBalance().compareTo(total) < 0) {
+            throw new InsufficientFundsException();
+        }
+        
+        // Debit account
+        acct.setBalance(acct.getBalance().subtract(total));
+        bankAccountRepository.save(acct);
+
+        // Set payment references for employees
+        for (Employee e : emps) {
+            if (e.getPaymentRef() == null || e.getPaymentRef().isBlank()) {
+                String token = "TRX-" + batch.getId() + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+                e.setPaymentRef(token);
+            }
+        }
+        employeeRepository.saveAll(emps);
+    }
+
+    // Custom exceptions for helper
+    private static class BankAccountNotFoundException extends RuntimeException {}
+    private static class InsufficientFundsException extends RuntimeException {}
+
+
+    @PutMapping("/{id}/reject")
+    @Operation(summary = "Reject a batch", description = "Reject a pending batch (L1 or L2)")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Batch rejected successfully"),
+            @ApiResponse(responseCode = "400", description = "Invalid request or batch not pending"),
+            @ApiResponse(responseCode = "404", description = "Batch not found"),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+    })
+    public ResponseEntity<ApprovalBatchDto> rejectBatch(
+            @Parameter(description = "Batch ID", required = true) @PathVariable Long id,
+            @RequestBody ApprovalRequestDto approvalRequest) {
+        
+        // Authentication is now handled by /api/auth/login
+        
+        try {
+            Batch batch = batchRepository.findById(id).orElse(null);
+            if (batch == null) return ResponseEntity.notFound().build();
+
+            String currentStatus = batch.getPaymentStatus();
+
+            // Check if batch is in a valid state to be rejected
+            if (currentStatus == null ||
+                    (!currentStatus.equalsIgnoreCase("Pending") && !currentStatus.equalsIgnoreCase("Pending_L2"))) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build(); // Already approved/rejected
+            }
+            
+            // Rejection at any stage (L1 or L2) moves to "rejected"
+            batch.setPaymentStatus("rejected");
+            batch.setLastPaymentDate(java.time.LocalDateTime.now());
+            // Store the person who rejected it
+            batch.setApprover1Name(approvalRequest.getApproverName()); 
+            batchRepository.save(batch);
+
+            ApprovalBatchDto dto = mapBatchToApprovalDto(batch);
+            dto.setApprovedBy(approvalRequest.getApproverName()); // 'approvedBy' field is used for 'rejectedBy'
+            dto.setApprovedDate(java.time.LocalDateTime.now());
+            dto.setApprovalComments(approvalRequest.getComments());
+            
+            return ResponseEntity.ok(dto);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * THIS METHOD IS HEAVILY UPDATED
+     * It now populates the new DTO fields for the frontend.
+     */
+    private ApprovalBatchDto mapBatchToApprovalDto(Batch batch) {
+        java.util.List<Employee> emps = employeeRepository.findByBatchId(batch.getId());
+        java.math.BigDecimal total = emps.stream()
+                .map(Employee::getSalaryAmount)
+                .filter(java.util.Objects::nonNull)
+                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+        
+        ApprovalBatchDto dto = new ApprovalBatchDto();
+        dto.setId(batch.getId());
+        dto.setBatchName(batch.getName());
+        dto.setCreatedBy("Unknown"); // You should set this from the Batch entity if it exists
+        dto.setCreatedDate(java.time.LocalDateTime.now()); // You should set this from the Batch entity
+        
+        String status = batch.getPaymentStatus() != null ? batch.getPaymentStatus().toLowerCase() : "pending";
+        dto.setStatus(status);
+        
+        dto.setTotalAmount(total);
+        dto.setCurrency(batch.getCurrency());
+        dto.setEmployeeCount(emps.size());
+        dto.setDebitAccount(batch.getDebitAccount());
+        dto.setDescription(null); // Set from Batch entity if it exists
+
+        // --- NEW DUAL-APPROVAL DTO LOGIC ---
+        boolean requiresDual = total.compareTo(DUAL_APPROVAL_THRESHOLD) > 0;
+        
+        dto.setApprovalsRequired(requiresDual ? 2 : 1);
+        
+        if (status.equals("pending_l2")) {
+            dto.setApprovalsReceived(1);
+        } else if (status.equals("approved") || status.equals("rejected")) {
+            dto.setApprovalsReceived(dto.getApprovalsRequired()); // Or based on approver fields
+        } else {
+            dto.setApprovalsReceived(0);
+        }
+        
+        dto.setApprover1Name(batch.getApprover1Name());
+        
+        // Note: 'approvedBy' and 'approvedDate' are set by the caller (approve/reject methods)
+        // as they relate to the *last action* taken.
+        
+        return dto;
+    }
+
+    @GetMapping("/statistics")
+    @Operation(summary = "Get approval statistics", description = "Get statistics about pending and reviewed batches")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "Successfully retrieved statistics",
+                    content = @Content(schema = @Schema(implementation = ApprovalStatisticsDto.class))),
+            @ApiResponse(responseCode = "500", description = "Internal server error")
+    })
+    public ResponseEntity<ApprovalStatisticsDto> getApprovalStatistics() {
+        try {
+            ApprovalStatisticsDto statistics = approvalService.getApprovalStatistics();
+            return ResponseEntity.ok(statistics);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+}
+
+
+5. ApprovalBatchDto.java
+
+package paymentinitiationbackend.dto;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+public class ApprovalBatchDto {
+
+    private Long id;
+    private String batchName;
+    private String createdBy;
+    private LocalDateTime createdDate;
+    private String status; // "pending", "pending_l2", "approved", "rejected"
+    private BigDecimal totalAmount;
+    private String currency;
+    private Integer employeeCount;
+    private String debitAccount;
+    private String description;
+
+    // Fields for the last action taken
+    private String approvedBy; // Name of the user who took the last action
+    private LocalDateTime approvedDate; // Timestamp of the last action
+    private String approvalComments; // Comments from the last action
+
+    // New fields for dual-approval tracking
+    private Integer approvalsRequired;
+    private Integer approvalsReceived;
+    private String approver1Name; // Name of the L1 approver
+
+    // Getters and Setters
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getBatchName() {
+        return batchName;
+    }
+
+    public void setBatchName(String batchName) {
+        this.batchName = batchName;
+    }
+
+    public String getCreatedBy() {
+        return createdBy;
+    }
+
+    public void setCreatedBy(String createdBy) {
+        this.createdBy = createdBy;
+    }
+
+    public LocalDateTime getCreatedDate() {
+        return createdDate;
+    }
+
+    public void setCreatedDate(LocalDateTime createdDate) {
+        this.createdDate = createdDate;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public BigDecimal getTotalAmount() {
+        return totalAmount;
+    }
+
+    public void setTotalAmount(BigDecimal totalAmount) {
+        this.totalAmount = totalAmount;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public void setCurrency(String currency) {
+        this.currency = currency;
+    }
+
+    public Integer getEmployeeCount() {
+        return employeeCount;
+    }
+
+    public void setEmployeeCount(Integer employeeCount) {
+        this.employeeCount = employeeCount;
+    }
+
+    public String getDebitAccount() {
+        return debitAccount;
+    }
+
+    public void setDebitAccount(String debitAccount) {
+        this.debitAccount = debitAccount;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
+    public String getApprovedBy() {
+        return approvedBy;
+    }
+
+    public void setApprovedBy(String approvedBy) {
+        this.approvedBy = approvedBy;
+    }
+
+    public LocalDateTime getApprovedDate() {
+        return approvedDate;
+    }
+
+    public void setApprovedDate(LocalDateTime approvedDate) {
+        this.approvedDate = approvedDate;
+    }
+
+    public String getApprovalComments() {
+        return approvalComments;
+    }
+
+    public void setApprovalComments(String approvalComments) {
+        this.approvalComments = approvalComments;
+    }
+
+    public Integer getApprovalsRequired() {
+        return approvalsRequired;
+    }
+
+    public void setApprovalsRequired(Integer approvalsRequired) {
+        this.approvalsRequired = approvalsRequired;
+    }
+
+    public Integer getApprovalsReceived() {
+        return approvalsReceived;
+    }
+
+    public void setApprovalsReceived(Integer approvalsReceived) {
+        this.approvalsReceived = approvalsReceived;
+    }
+
+    public String getApprover1Name() {
+        return approver1Name;
+    }
+
+    public void setApprover1Name(String approver1Name) {
+        this.approver1Name = approver1Name;
+    }
+}
+
+
+6. Batch.java
+
+
+package paymentinitiationbackend.model;
+
+import jakarta.persistence.*;
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "batches") // Assuming the table name is "batches"
+public class Batch {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "name", length = 100)
+    private String name;
+
+    @Column(name = "payment_status", length = 20)
+    private String paymentStatus; // e.g., "Pending", "Pending_L2", "Approved", "Rejected"
+
+    @Column(name = "debit_account", length = 50)
+    private String debitAccount;
+
+    @Column(name = "currency", length = 3)
+    private String currency;
+
+    @Column(name = "last_payment_date")
+    private LocalDateTime lastPaymentDate;
+
+    // --- NEW FIELDS FOR DUAL-APPROVAL ---
+    @Column(name = "approver_1_name", length = 100)
+    private String approver1Name;
+
+    @Column(name = "approver_2_name", length = 100)
+    private String approver2Name;
+
+    // Constructors
+    public Batch() {
+    }
+
+    // Getters and Setters
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getPaymentStatus() {
+        return paymentStatus;
+    }
+
+    public void setPaymentStatus(String paymentStatus) {
+        this.paymentStatus = paymentStatus;
+    }
+
+    public String getDebitAccount() {
+        return debitAccount;
+    }
+
+    public void setDebitAccount(String debitAccount) {
+        this.debitAccount = debitAccount;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public void setCurrency(String currency) {
+        this.currency = currency;
+    }
+
+    public LocalDateTime getLastPaymentDate() {
+        return lastPaymentDate;
+    }
+
+    public void setLastPaymentDate(LocalDateTime lastPaymentDate) {
+        this.lastPaymentDate = lastPaymentDate;
+    }
+
+    public String getApprover1Name() {
+        return approver1Name;
+    }
+
+    public void setApprover1Name(String approver1Name) {
+        this.approver1Name = approver1Name;
+    }
+
+    public String getApprover2Name() {
+        return approver2Name;
+    }
+
+    public void setApprover2Name(String approver2Name) {
+        this.approver2Name = approver2Name;
+    }
+}
+
+
+
+
+
+---------------------------------------------------------------------------------------Frontend---------------------------------------------------------------------------------------------------------------------
+
+1. ApproverPage.js
+
+import React, { useState, useEffect } from 'react';
+import PayrollCard from './PayrollCard';
+import PayrollDetailsModal from './PayrollDetailsModal';
+import ApprovalService from '../../services/ApprovalService';
+import { getEmployees } from '../../services/api';
+
+const ApproverPage = () => {
+    const [payrolls, setPayrolls] = useState([]);
+    const [selectedPayroll, setSelectedPayroll] = useState(null);
+    const [showDetailsModal, setShowDetailsModal] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [allEmployees, setAllEmployees] = useState([]);
+    const [searchId, setSearchId] = useState('');
+    const [showAuthModal, setShowAuthModal] = useState(false);
+
+    // --- NEW/MODIFIED STATE for Auth ---
+    const [authUserId, setAuthUserId] = useState('');
+    const [authPassword, setAuthPassword] = useState('');
+    const [pendingAction, setPendingAction] = useState(null);
+    const [authError, setAuthError] = useState('');
+    const [authLoading, setAuthLoading] = useState(false); // Auth-specific loading
+
+    // Load pending payrolls from API
+    const loadPendingBatches = async () => {
+        setIsLoading(true);
+        try {
+            const apiBatches = await ApprovalService.getPendingBatches();
+            const transformedBatches = apiBatches
+                .map(ApprovalService.transformBatchData)
+                .filter(b => (b.debitAccount && String(b.debitAccount).trim() !== '') && (b.currency && String(b.currency).trim() !== ''));
+            setPayrolls(transformedBatches);
+
+            // Load employees if not already loaded or if needed
+            if (allEmployees.length === 0) {
+                try {
+                    const employees = await getEmployees();
+                    setAllEmployees(Array.isArray(employees) ? employees : []);
+                } catch (empErr) {
+                    console.error('Error loading employees:', empErr);
+                    setAllEmployees([]);
+                }
+            }
+        } catch (error) {
+            console.error('Error loading pending batches:', error);
+            setPayrolls([]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        loadPendingBatches();
+    }, []); // Removed allEmployees from dependency array to prevent re-fetch
+
+    const handleViewDetails = (payroll) => {
+        setSelectedPayroll(payroll);
+        setShowDetailsModal(true);
+    };
+
+    const handleCloseModal = () => {
+        setShowDetailsModal(false);
+        setSelectedPayroll(null);
+    };
+
+    const handleAuthPrompt = (action, payrollId) => {
+        setPendingAction({ action, payrollId });
+        setShowAuthModal(true);
+        setAuthUserId(''); // Clear fields on open
+        setAuthPassword('');
+        setAuthError('');
+    };
+
+    const handleAuthSubmit = async () => {
+        setAuthLoading(true);
+        setAuthError('');
+
+        try {
+            // Step 1: Authenticate using the new service
+            await ApprovalService.login(authUserId, authPassword);
+
+            // Step 2: Auth success, close modal and proceed with action
+            setShowAuthModal(false);
+
+            const comments = prompt(
+                `Please enter optional comments for this ${pendingAction.action}:`,
+                pendingAction.action === 'approve' ? 'Approved' : 'Rejected'
+            );
+
+            // User pressed cancel on the comment prompt
+            if (comments === null) {
+                setAuthLoading(false);
+                setPendingAction(null);
+                return; 
+            }
+
+            const approvalDetails = {
+                approverName: authUserId, // Use the authenticated User ID
+                comments: comments || (pendingAction.action === 'approve' ? 'Approved' : 'Rejected')
+            };
+
+            if (pendingAction.action === 'approve') {
+                await handleApprove(pendingAction.payrollId, approvalDetails);
+            } else if (pendingAction.action === 'reject') {
+                await handleReject(pendingAction.payrollId, approvalDetails);
+            }
+
+            setPendingAction(null);
+
+        } catch (error) {
+            console.error('Authentication or action failed:', error);
+            setAuthError(error.message || 'Invalid User ID or Password.');
+        } finally {
+            setAuthLoading(false);
+        }
+    };
+
+    const handleAuthCancel = () => {
+        setShowAuthModal(false);
+        setPendingAction(null);
+        setAuthPassword('');
+        setAuthUserId('');
+        setAuthError('');
+    };
+
+    // MODIFIED: This function now re-fetches the list on success
+    const handleApprove = async (payrollId, approvalDetails) => {
+        setIsLoading(true); // Use main page loader
+
+        try {
+            const item = payrolls.find(p => p.id === payrollId);
+            const batchId = item?.batchId || item?.id;
+
+            const approvalData = {
+                approverName: approvalDetails.approverName,
+                comments: approvalDetails.comments
+                // No password is sent here
+            };
+
+            // API call now returns the updated batch DTO
+            const updatedBatch = await ApprovalService.approveBatch(batchId, approvalData);
+
+            // Close modal if open
+            if (showDetailsModal) {
+                handleCloseModal();
+            }
+
+            // Show success message based on outcome
+            if (updatedBatch.status === 'pending_l2') {
+                alert('Batch approved for L1. Now pending L2 approval.');
+            } else if (updatedBatch.status === 'approved') {
+                alert('Payroll batch approved successfully!');
+            }
+
+            // REFRESH the entire list to show new status (L1 -> L2)
+            await loadPendingBatches();
+            
+            try {
+                window.dispatchEvent(new Event('approvals:updated'));
+            } catch (_) { }
+
+        } catch (error) {
+            console.error('Error approving batch:', error);
+            alert(`Error approving batch: ${error.message}`);
+            setIsLoading(false); // Only stop loading on error
+        }
+        // setIsLoading(false) is handled by loadPendingBatches()
+    };
+
+    // MODIFIED: This function also re-fetches the list
+    const handleReject = async (payrollId, approvalDetails) => {
+        setIsLoading(true);
+
+        try {
+            const item = payrolls.find(p => p.id === payrollId);
+            const batchId = item?.batchId || item?.id;
+
+            const approvalData = {
+                approverName: approvalDetails.approverName,
+                comments: approvalDetails.comments
+            };
+
+            await ApprovalService.rejectBatch(batchId, approvalData);
+
+            // Close modal if open
+            if (showDetailsModal) {
+                handleCloseModal();
+            }
+
+            alert('Payroll batch rejected successfully!');
+
+            // REFRESH the entire list to remove the rejected item
+            await loadPendingBatches();
+
+            try {
+                window.dispatchEvent(new Event('approvals:updated'));
+            } catch (_) { }
+
+        } catch (error) {
+            console.error('Error rejecting batch:', error);
+            alert(`Error rejecting batch: ${error.message}`);
+            setIsLoading(false); // Only stop loading on error
+        }
+        // setIsLoading(false) is handled by loadPendingBatches()
+    };
+
+    // Filter logic remains the same
+    const pendingPayrolls = payrolls.filter(payroll => {
+        const isPending = payroll.status === 'pending' || payroll.status === 'pending_l2'; // Updated
+        const matchesSearch = searchId === '' || payroll.id.toLowerCase().includes(searchId.toLowerCase());
+        return isPending && matchesSearch;
+    }).sort((a, b) => new Date(a.createdDate) - new Date(b.createdDate));
+
+    return (
+        <div className="approver-page">
+            <div className="container">
+                {/* Header */}
+                <div className="page-header">
+                    <h1 className="page-title">Payroll Approval Dashboard</h1>
+                    <p className="page-subtitle">
+                        Review and approve pending payroll batches
+                    </p>
+                </div>
+
+                {/* Statistics (This will correctly reflect pending L1 + L2) */}
+                <div className="stats-section">
+                    <div className="stat-card">
+                        <div className="stat-icon pending"></div>
+                        <div className="stat-content">
+                            <div className="stat-value">{pendingPayrolls.length}</div>
+                            <div className="stat-label">Pending Approvals</div>
+                        </div>
+                    </div>
+                    {/* ... other stat cards ... */}
+                </div>
+
+                {/* Search Bar */}
+                {/* ... (search bar JSX remains the same) ... */}
+
+                {/* Payroll Cards */}
+                <div className="payrolls-section">
+                    <div className="section-header">
+                        <h2 className="section-title">Pending Payroll Batches</h2>
+                        <div className="section-count">
+                            {pendingPayrolls.length} batch{pendingPayrolls.length !== 1 ? 'es' : ''} pending
+                        </div>
+                    </div>
+
+                    {pendingPayrolls.length === 0 ? (
+                        <div className="empty-state">
+                            {/* ... (empty state JSX remains the same) ... */}
+                        </div>
+                    ) : (
+                        <div className="payrolls-grid">
+                            {pendingPayrolls.map(payroll => (
+                                <PayrollCard
+                                    key={payroll.id}
+                                    payroll={payroll}
+                                    onViewDetails={handleViewDetails}
+                                    onApprove={(id) => handleAuthPrompt('approve', id)}
+                                    onReject={(id) => handleAuthPrompt('reject', id)}
+                                    isLoading={isLoading} // Use main loader
+                                />
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {/* Details Modal */}
+                {showDetailsModal && (
+                    <PayrollDetailsModal
+                        payroll={selectedPayroll}
+                        employees={allEmployees.filter(e => String(e.batchId || '') === String(selectedPayroll?.id || ''))}
+                        onClose={handleCloseModal}
+                        onApprove={(id) => handleAuthPrompt('approve', id)}
+                        onReject={(id) => handleAuthPrompt('reject', id)}
+                        isLoading={isLoading} // Use main loader
+                    />
+                )}
+
+                {/* --- MODIFIED: Authentication Modal --- */}
+                {showAuthModal && (
+                    <div className="modal-overlay">
+                        <div className="modal">
+                            <div className="modal-header">
+                                <h3 className="modal-title">Authentication Required</h3>
+                                <button className="modal-close" onClick={handleAuthCancel}>×</button>
+                            </div>
+                            <div className="modal-body">
+                                <p>Please enter your credentials to {pendingAction?.action} this payroll batch:</p>
+                                
+                                <div className="form-group">
+                                    <label className="form-label">User ID</label>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={authUserId}
+                                        onChange={(e) => setAuthUserId(e.target.value)}
+                                        placeholder="Enter your User ID"
+                                        autoFocus
+                                    />
+                                </div>
+                                
+                                <div className="form-group">
+                                    <label className="form-label">Password</label>
+                                    <input
+                                        type="password"
+                                        className="form-input"
+                                        value={authPassword}
+                                        onChange={(e) => setAuthPassword(e.target.value)}
+                                        placeholder="Enter your password"
+                                    />
+                                </div>
+
+                                {authError && (
+                                    <div style={{ color: '#ef4444', fontSize: '14px', marginTop: '8px' }}>
+                                        {authError}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="modal-footer">
+                                <button className="btn btn-outline" onClick={handleAuthCancel} disabled={authLoading}>
+                                    Cancel
+                                </button>
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={handleAuthSubmit}
+                                    disabled={!authUserId.trim() || !authPassword.trim() || authLoading}
+                                >
+                                    {authLoading ? 'Authenticating...' : (pendingAction?.action === 'approve' ? 'Authenticate & Approve' : 'Authenticate & Reject')}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+export default ApproverPage;
+
+
+
+2. ApprovalService.js
+
+// Assuming this file is at: src/services/ApprovalService.js
+// Adjust API_BASE_URL if your backend is on a different port/domain
+const API_BASE_URL = '/api';
+
+/**
+ * Helper to handle fetch responses
+ */
+const handleResponse = async (response) => {
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Request failed with status ${response.status}`);
+    }
+    return response.json();
+};
+
+/**
+ * Authenticates an approver using the new auth endpoint.
+ * Throws an error if authentication fails.
+ */
+const login = async (userId, password) => {
+    const response = await fetch(`${API_BASE_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            approverName: userId, // Map to the DTO field
+            password: password
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Authentication failed');
+    }
+
+    return await response.text(); // Returns "Authentication successful"
+};
+
+/**
+ * Fetches all pending (L1 and L2) batches
+ */
+const getPendingBatches = async () => {
+    const response = await fetch(`${API_BASE_URL}/approvals/pending`);
+    return handleResponse(response);
+};
+
+/**
+ * Fetches all reviewed (approved/rejected) batches
+ */
+const getReviewedBatches = async () => {
+    const response = await fetch(`${API_BASE_URL}/approvals/reviewed`);
+    return handleResponse(response);
+};
+
+/**
+ * Approves a batch (L1 or L2)
+ * Updated to return the JSON response
+ */
+const approveBatch = async (batchId, approvalData) => {
+    const response = await fetch(`${API_BASE_URL}/approvals/${batchId}/approve`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(approvalData), // DTO without password
+    });
+    return handleResponse(response); // Returns updated batch DTO
+};
+
+/**
+ * Rejects a batch
+ * Updated to return the JSON response
+ */
+const rejectBatch = async (batchId, approvalData) => {
+    const response = await fetch(`${API_BASE_URL}/approvals/${batchId}/reject`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(approvalData), // DTO without password
+    });
+    return handleResponse(response); // Returns updated batch DTO
+};
+
+/**
+ * Transforms raw API batch data into the format expected by the frontend components.
+ * This is based on the DTO fields.
+ */
+const transformBatchData = (batch) => {
+    return {
+        id: batch.id,
+        batchId: batch.id, // Use 'id' as batchId for consistency
+        batchName: batch.batchName,
+        createdBy: batch.createdBy || 'Unknown',
+        createdDate: batch.createdDate || new Date().toISOString(),
+        status: batch.status, // "pending", "pending_l2", "approved", "rejected"
+        totalAmount: batch.totalAmount,
+        currency: batch.currency,
+        employeeCount: batch.employeeCount,
+        approversRequired: batch.approvalsRequired || 1,
+        approversAssigned: batch.approvalsReceived || 0,
+        debitAccount: batch.debitAccount,
+        description: batch.description,
+        approvedBy: batch.approvedBy,
+        approvedDate: batch.approvedDate,
+        approvalComments: batch.approvalComments,
+        approver1Name: batch.approver1Name,
+    };
+};
+
+const ApprovalService = {
+    login,
+    getPendingBatches,
+    getReviewedBatches,
+    approveBatch,
+    rejectBatch,
+    transformBatchData
+};
+
+export default ApprovalService;
