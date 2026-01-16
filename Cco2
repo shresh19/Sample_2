@@ -1,0 +1,181 @@
+package scb.ebbs.accounts.ejb;
+
+// --- Standard Imports ---
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.MockitoJUnitRunner;
+
+// --- Mockito Matchers ---
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+// --- Project Imports (Based on your screenshots) ---
+import scb.util.BusinessEvent;
+import scb.util.LogWriter;
+import scb.util.SystemProperties;
+import scb.util.EBBSConstants;
+import scb.wrapper.BusinessEventWrapper;
+import scb.exception.SCBApplicationException;
+
+// Wrappers
+import scb.ebbs.ecustomer.wrapper.RelationshipWrapper;
+import scb.ebbs.accounts.wrapper.AccountMasterWrapper;
+import scb.ebbs.accounts.wrapper.SubsidiaryAccountWrapper;
+import scb.ebbs.ecodes.wrapper.SystemWrapper; // Added this
+
+// Entities & Homes
+import scb.ebbs.accounts.factory.AccountEventDAOFactory;
+import scb.ebbs.ecodes.ejb.IDGeneratorSession;
+import scb.ebbs.ecodes.ejb.IDGeneratorSessionHome;
+import scb.ebbs.ecodes.ejb.SystemEntity;
+import scb.ebbs.ecodes.ejb.SystemEntityHome;
+import scb.ebbs.ecodes.ejb.SystemEntityKey; // Added this
+import scb.ebbs.ecodes.factory.SystemDAOFactory;
+
+@RunWith(MockitoJUnitRunner.class)
+public class AccountCreationListenerTest {
+
+    private AccountCreationListener listener;
+
+    @Mock private BusinessEvent mockBusinessEvent;
+    
+    // Mocks for Lookups and Factories
+    @Mock private SystemProperties mockSystemPropertiesInstance;
+    @Mock private LogWriter mockLogWriterInstance;
+    
+    // Mocks for EJBs and Entities
+    @Mock private AccountEventEntityHome mockAccountEventEntityHome;
+    @Mock private IDGeneratorSessionHome mockIdGenHome;
+    @Mock private IDGeneratorSession mockIdGenSession;
+    @Mock private SystemEntityHome mockSystemEntityHome;
+    @Mock private SystemEntity mockSystemEntity;
+    
+    // Mocks for Wrappers (Input Data)
+    @Mock private RelationshipWrapper mockRelationshipWrapper;
+    @Mock private AccountMasterWrapper mockAccountMasterWrapper;
+    @Mock private SubsidiaryAccountWrapper mockSubsidiaryWrapper;
+    @Mock private SystemWrapper mockSystemWrapper; // Mock for the System wrapper
+
+    // Static Mock Controllers
+    private MockedStatic<SystemProperties> systemPropertiesStatic;
+    private MockedStatic<AccountEventDAOFactory> accountEventDAOFactoryStatic;
+    private MockedStatic<SystemDAOFactory> systemDAOFactoryStatic;
+    private MockedStatic<LogWriter> logWriterStatic;
+
+    @Before
+    public void setUp() throws Exception {
+        listener = new AccountCreationListener();
+
+        // 1. Initialize Static Mocks
+        systemPropertiesStatic = mockStatic(SystemProperties.class);
+        accountEventDAOFactoryStatic = mockStatic(AccountEventDAOFactory.class);
+        systemDAOFactoryStatic = mockStatic(SystemDAOFactory.class);
+        logWriterStatic = mockStatic(LogWriter.class);
+
+        // 2. Configure Static Factories to return our Mock Instances
+        systemPropertiesStatic.when(SystemProperties::getInstance).thenReturn(mockSystemPropertiesInstance);
+        logWriterStatic.when(LogWriter::getInstance).thenReturn(mockLogWriterInstance);
+        
+        // 3. Configure DAO Factory lookups
+        // Use anyString() to be safe against constant value mismatches
+        accountEventDAOFactoryStatic.when(() -> AccountEventDAOFactory.getDAOInstance(anyString()))
+                .thenReturn(mockAccountEventEntityHome);
+        
+        // This was the likely point of failure (Line 63)
+        systemDAOFactoryStatic.when(() -> SystemDAOFactory.getDAOInstance(anyString()))
+                .thenReturn(mockSystemEntityHome);
+
+        // 4. Configure JNDI/Local Lookups via SystemProperties
+        when(mockSystemPropertiesInstance.localLookup(anyString(), contains("IDGeneratorSession")))
+                .thenReturn(mockIdGenHome);
+        
+        // 5. Configure EJB Creations/Finders
+        when(mockIdGenHome.create()).thenReturn(mockIdGenSession);
+        
+        // Handle "new SystemEntityKey()" by using any()
+        when(mockSystemEntityHome.findByPrimaryKey(any())).thenReturn(mockSystemEntity);
+        
+        // 6. Configure SystemEntity behaviors (Line 65 & 79)
+        // Code calls sysEntity.getWrapper()
+        when(mockSystemEntity.getWrapper()).thenReturn(mockSystemWrapper);
+        
+        // 7. Common behaviors for Generator
+        // Use any() for the 2nd argument to accept null or String or UserDetail
+        when(mockIdGenSession.generateDateBasedID(anyString(), any(), any(Integer.class)))
+             .thenReturn(12345);
+    }
+
+    @After
+    public void tearDown() {
+        // IMPORTANT: Close static mocks to avoid memory leaks
+        if(systemPropertiesStatic != null) systemPropertiesStatic.close();
+        if(accountEventDAOFactoryStatic != null) accountEventDAOFactoryStatic.close();
+        if(systemDAOFactoryStatic != null) systemDAOFactoryStatic.close();
+        if(logWriterStatic != null) logWriterStatic.close();
+    }
+
+    @Test
+    public void testBusinessTriggered_WithRelationshipWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockRelationshipWrapper);
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        // Verify flow reached the generator and creation
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+    }
+
+    @Test
+    public void testBusinessTriggered_WithAccountMasterWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockAccountMasterWrapper);
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+    }
+
+    @Test
+    public void testBusinessTriggered_WithSubsidiaryAccountWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockSubsidiaryWrapper);
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+    }
+
+    @Test(expected = SCBApplicationException.class)
+    public void testBusinessTriggered_ExceptionHandling() throws Exception {
+        // Arrange
+        // Force an exception during the process
+        when(mockBusinessEvent.getObject()).thenThrow(new RuntimeException("Test Exception"));
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+        
+        // Assert
+        // The expected=SCBApplicationException.class handles the success of this test
+    }
+}
