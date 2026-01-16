@@ -1,0 +1,179 @@
+package scb.ebbs.accounts.ejb;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.MockitoJUnitRunner;
+
+// Import your project classes based on the images provided
+import scb.ebbs.accounts.factory.AccountEventDAOFactory;
+import scb.ebbs.accounts.wrapper.AccountMasterWrapper;
+import scb.ebbs.accounts.wrapper.SubsidiaryAccountWrapper;
+import scb.ebbs.ecodes.ejb.IDGeneratorSession;
+import scb.ebbs.ecodes.ejb.IDGeneratorSessionHome;
+import scb.ebbs.ecodes.ejb.SystemEntity;
+import scb.ebbs.ecodes.ejb.SystemEntityHome;
+import scb.ebbs.ecodes.factory.SystemDAOFactory;
+import scb.ebbs.ecustomer.wrapper.RelationshipWrapper;
+import scb.ebbs.util.BusinessEvent;
+import scb.ebbs.util.LogWriter;
+import scb.ebbs.util.SystemProperties;
+import scb.exception.SCBApplicationException;
+import scb.wrapper.BusinessEventWrapper;
+
+@RunWith(MockitoJUnitRunner.class)
+public class AccountCreationListenerTest {
+
+    private AccountCreationListener listener;
+
+    @Mock private BusinessEvent mockBusinessEvent;
+    
+    // Mocks for Lookups and Factories
+    @Mock private SystemProperties mockSystemPropertiesInstance;
+    @Mock private LogWriter mockLogWriterInstance;
+    
+    // Mocks for EJBs and Entities
+    @Mock private AccountEventEntityHome mockAccountEventEntityHome;
+    @Mock private IDGeneratorSessionHome mockIdGenHome;
+    @Mock private IDGeneratorSession mockIdGenSession;
+    @Mock private SystemEntityHome mockSystemEntityHome;
+    @Mock private SystemEntity mockSystemEntity;
+    
+    // Mocks for Wrappers (Input Data)
+    @Mock private RelationshipWrapper mockRelationshipWrapper;
+    @Mock private AccountMasterWrapper mockAccountMasterWrapper;
+    @Mock private SubsidiaryAccountWrapper mockSubsidiaryWrapper;
+
+    // Static Mock Controllers (Required for legacy static calls)
+    private MockedStatic<SystemProperties> systemPropertiesStatic;
+    private MockedStatic<AccountEventDAOFactory> accountEventDAOFactoryStatic;
+    private MockedStatic<SystemDAOFactory> systemDAOFactoryStatic;
+    private MockedStatic<LogWriter> logWriterStatic;
+
+    @Before
+    public void setUp() throws Exception {
+        listener = new AccountCreationListener();
+
+        // 1. Initialize Static Mocks
+        systemPropertiesStatic = mockStatic(SystemProperties.class);
+        accountEventDAOFactoryStatic = mockStatic(AccountEventDAOFactory.class);
+        systemDAOFactoryStatic = mockStatic(SystemDAOFactory.class);
+        logWriterStatic = mockStatic(LogWriter.class);
+
+        // 2. Configure Static Factories to return our Mock Instances
+        systemPropertiesStatic.when(SystemProperties::getInstance).thenReturn(mockSystemPropertiesInstance);
+        logWriterStatic.when(LogWriter::getInstance).thenReturn(mockLogWriterInstance);
+        
+        // 3. Configure DAO Factory lookups
+        accountEventDAOFactoryStatic.when(() -> AccountEventDAOFactory.getDAOInstance(contains("AccountEventEntity")))
+                .thenReturn(mockAccountEventEntityHome);
+        
+        systemDAOFactoryStatic.when(() -> SystemDAOFactory.getDAOInstance(contains("SystemEntity")))
+                .thenReturn(mockSystemEntityHome);
+
+        // 4. Configure JNDI/Local Lookups via SystemProperties
+        // Logic: (IDGeneratorSessionHome) SystemProperties.getInstance().localLookup(..., "IDGeneratorSession")
+        when(mockSystemPropertiesInstance.localLookup(anyString(), contains("IDGeneratorSession")))
+                .thenReturn(mockIdGenHome);
+        
+        // Logic: (SystemEntityHome) SystemProperties.getInstance().localLookup(..., "SystemEntity")
+        // Note: The code actually uses SystemDAOFactory for SystemEntityHome, but usually does a lookup first.
+        // Based on code: sysEntityHome = (SystemEntityHome) SystemDAOFactory.getDAOInstance("SystemEntity");
+        
+        // 5. Configure EJB Creations/Finders
+        when(mockIdGenHome.create()).thenReturn(mockIdGenSession);
+        when(mockSystemEntityHome.findByPrimaryKey(any())).thenReturn(mockSystemEntity);
+        
+        // 6. Common behaviors
+        when(mockIdGenSession.generateDateBasedID(anyString(), anyString(), any(Integer.class)))
+             .thenReturn("SEQ-12345");
+        // Mocking the 'checkerDetail' public field access might require the real object or a mock that handles fields.
+        // Since we are mocking the wrappers, we must ensure field access doesn't crash if they are public fields.
+        // Assuming getters exist or public fields are accessible. If direct field access, standard mocks are fine
+        // as long as the code reads them (which returns null/0 defaults). 
+    }
+
+    @After
+    public void tearDown() {
+        // IMPORTANT: Close static mocks to avoid memory leaks and interference with other tests
+        systemPropertiesStatic.close();
+        accountEventDAOFactoryStatic.close();
+        systemDAOFactoryStatic.close();
+        logWriterStatic.close();
+    }
+
+    @Test
+    public void testBusinessTriggered_WithRelationshipWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockRelationshipWrapper);
+        // If checkerDetail is a public field, Mockito can't mock it easily without reflection, 
+        // but if it's accessed normally, the default null is fine for the test flow unless used in toString.
+        // Let's assume generic toString behavior or that the mock handles it.
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        // Verify flow entered the RelationshipWrapper block
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+        verify(mockLogWriterInstance, times(1)).printDebugMode(contains("RelationshipWrapper")); 
+        // Note: I adjusted the string above to match the logic roughly, or just verify *any* debug log.
+    }
+
+    @Test
+    public void testBusinessTriggered_WithAccountMasterWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockAccountMasterWrapper);
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+    }
+
+    @Test
+    public void testBusinessTriggered_WithSubsidiaryAccountWrapper() throws Exception {
+        // Arrange
+        when(mockBusinessEvent.getObject()).thenReturn(mockSubsidiaryWrapper);
+
+        // Act
+        listener.businessTriggered(mockBusinessEvent);
+
+        // Assert
+        verify(mockIdGenSession).generateDateBasedID(eq("AccountEvent"), any(), eq(12));
+        verify(mockAccountEventEntityHome).create(any(BusinessEventWrapper.class));
+    }
+
+    @Test(expected = SCBApplicationException.class)
+    public void testBusinessTriggered_ExceptionHandling() throws Exception {
+        // Arrange
+        // Force an exception during the process (e.g., getting the object fails)
+        when(mockBusinessEvent.getObject()).thenThrow(new RuntimeException("Database Down"));
+
+        // Act
+        try {
+            listener.businessTriggered(mockBusinessEvent);
+        } catch (SCBApplicationException e) {
+            // Assert
+            // Verify the error was logged before rethrowing
+            verify(mockLogWriterInstance).printErrorMessage(any(Exception.class));
+            throw e; // Rethrow to satisfy expected = SCBApplicationException.class
+        }
+    }
+}
